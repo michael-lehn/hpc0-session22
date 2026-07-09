@@ -1,0 +1,311 @@
+@ <stdlib.hdr>
+@ <stdio.hdr>
+
+@ "gen.hdr"
+@ "symtab.hdr"
+
+global usedReg: unsigned;
+global lastUsedReg: unsigned;
+
+fn getReg(): GenReg
+{
+    return lastUsedReg = usedReg++;
+}
+
+fn genReleaseReg(reg: GenReg)
+{
+}
+
+fn genConstant(val: ->UStr): GenReg
+{
+    local reg: GenReg = getReg();
+    printf("\t; load constant %s into %%%d\n", val, reg);
+    printf("\t%%%d = \tadd i64 \t%s, \t0\n", reg, val);
+    return reg;
+}
+
+fn genInstr(instr: GenInstr, left: GenReg, right: GenReg): GenReg
+{
+    local dest: GenReg = getReg();
+    switch (instr) {
+	case GEN_ADD:
+	    printf("\t%%%d = \tadd i64 \t%%%d, \t%%%d\n", dest, right, left);
+	    break;
+	case GEN_SUB:
+	    printf("\t%%%d = \tsub i64 \t%%%d, \t%%%d\n", dest, right, left);
+	    break;
+	case GEN_MUL:
+	    printf("\t%%%d = \tmul i64 \t%%%d, \t%%%d\n", dest, right, left);
+	    break;
+	case GEN_DIV:
+	    printf("\t%%%d = \tsdiv i64 \t%%%d, \t%%%d\n", dest, right, left);
+	    break;
+	default: assert(0);
+    }
+    return dest;
+}
+
+fn genInitCode()
+{
+    printf("declare i64 @getchar()\n");
+    printf("declare void @putchar(i64)\n");
+}
+
+global localVarOffset: int;
+
+fn genAddLocal(ident: ->UStr): bool
+{
+    localVarOffset -= 8;
+    printf("\t%%%s = \talloca i64, align 8\n", ident);
+    return symtabAddLocal(ident, localVarOffset);
+}
+
+fn genAddGlobal(ident: ->UStr): bool
+{
+    return symtabAddGlobal(ident);
+}
+
+fn genDefGlobal(ident: ->UStr)
+{
+    printf("@%s = global i64 0\n", ident);
+}
+
+struct FunctionBuildingInfo
+{
+    fnName: ->UStr;
+    bbClosed: bool;
+    retReg: GenReg;
+};
+
+global functionBuildingInfo: FunctionBuildingInfo;
+
+struct FnParamNode
+{
+    ident: ->UStr;
+    reg:   GenReg;
+    next:  ->FnParamNode;
+};
+
+global fnParamList, fnParamListLast: ->FnParamNode;
+
+fn genFuncDefParam(ident: ->UStr): bool
+{
+    local n: ->FnParamNode = malloc(sizeof(*n));
+    n->ident = ident;
+    n->next = nullptr;
+    if (!fnParamList) {
+	fnParamList = fnParamListLast = n;
+    } else {
+	fnParamListLast = fnParamListLast->next = n;
+    }
+    return symtabAddLocal(ident, 0);
+}
+
+fn genFuncDefBegin(name: ->UStr)
+{
+    usedReg = 0;
+
+
+    printf("; function %s\n", name);
+    printf("define i64 @%s(", name);
+    for (local n: ->FnParamNode = fnParamList; n; n = n->next) {
+	//printf("i64 %s", n->ident);
+	n->reg = getReg();
+	printf("i64 %%%d", n->reg);
+	if (n->next) {
+	    printf(", ");
+	}
+    }
+    printf(") {\n", name);
+    local entryLabel: GenLabel = genGetLabel();
+    genDefLabel(entryLabel);
+    for (local n: ->FnParamNode = fnParamList; n; ) {
+	// %.sum.a.0 = alloca i64, align 8
+	// store i64 %0, ptr %.sum.a.0, align 8
+	symtabAddLocal(n->ident, 0);
+	printf("\t%%%s = alloca i64, align 8\n", n->ident);
+	printf("\tstore i64 %%%d, ptr %%%s, align 8\n", n->reg, n->ident);
+	local f: ->FnParamNode = n;
+	n = n->next;
+	free(f);
+    }
+    fnParamList = nullptr;
+    functionBuildingInfo.retReg = getReg();
+    printf("\t%%%d = \talloca i64, align 8 ; ptr to ret val \n",
+	   functionBuildingInfo.retReg);
+
+    // hack: set *after* genDefLabel(entryLabel)
+    functionBuildingInfo.fnName = name;
+}
+
+fn genFuncDefEnd()
+{
+    local dest: GenReg = getReg();
+
+    local leaveLabel: GenLabel = genGetLabel();
+    genDefLabel(leaveLabel);
+    printf("\t%%%d = \tload i64, ptr %%%d, align 8\n",
+           dest, functionBuildingInfo.retReg);
+    printf("\tret \ti64 \t%%%d\n", dest);
+    printf("}\n\n");
+    functionBuildingInfo.fnName = nullptr;
+}
+
+fn genHalt(exitCode: GenReg)
+{
+}
+
+fn genReturn(retVal: GenReg)
+{
+    if (lastUsedReg != 0) {
+	printf("\tstore i64 %%%d, ptr %%%d, align 8\n",
+	       retVal, functionBuildingInfo.retReg);
+    }
+}
+
+fn genFetch(addr: GenReg): GenReg
+{
+    local dest: GenReg = getReg();
+    printf("\tfetch \t(%%%d, 3), \t%%%d\n", addr, dest);
+    return dest;
+}
+
+fn genStore(val: GenReg, addr: GenReg)
+{
+    local hack: GenReg = getReg();
+    printf("\tstore i64 %%%d, ptr %%%d, align 8\n", val, addr);
+    printf("\t%%%d = add i64 %%%d, 0; bloody hack\n", hack, val);
+}
+
+fn genLoadAddr(ident: ->UStr): GenReg
+{
+    local dest: GenReg = getReg();
+    local info: SymtabInfo;
+    assert(symtabGetInfo(ident, &info));
+    if (info.isGlobal) {
+	printf("\t; load address of global variable %s into %%%d\n",
+	       ident, dest);
+	printf("\t%%%d = getelementptr i64, ptr @%s, i64 0\n", dest, ident);
+    } else {
+	printf("\t; load address of local variable %s into %%%d\n",
+	       ident, dest);
+	printf("\t%%%d = getelementptr i64, ptr %%%s, i64 0\n", dest, ident);
+    }
+    return dest;
+}
+
+fn genLoadVar(ident: ->UStr): GenReg
+{
+    local info: SymtabInfo;
+    assert(symtabGetInfo(ident, &info));
+    local dest: GenReg = getReg();
+    if (info.isGlobal) {
+	printf("\t; load value of global variable %s:\n", ident);
+	printf("\t%%%d = \tload i64, ptr @%s, align 8\n", dest, ident);
+    } else {
+	printf("\t; load value of local variable %s into %%%d\n", ident, dest);
+	printf("\t%%%d = \tload i64, ptr %%%s, align 8\n", dest, ident);
+    }
+    return dest;
+}
+
+global labelCount: GenLabel;
+
+fn genGetLabel(): GenLabel
+{
+    return labelCount++;
+}
+
+fn genDefLabel(labelIdent: GenLabel)
+{
+    if (functionBuildingInfo.fnName && !functionBuildingInfo.bbClosed) {
+	genJump(labelIdent);
+    }
+    printf(".L%d:\n", labelIdent);
+    functionBuildingInfo.bbClosed = false;
+}
+
+fn genJump(labelIdent: GenLabel)
+{
+    printf("\tbr label %%.L%d\n", labelIdent);
+    functionBuildingInfo.bbClosed = true;
+}
+
+fn genCondJump(condVal: GenReg, cond: GenCond, labelIdent: GenLabel)
+{
+    local condReg: GenReg = getReg();
+    local cmpReg: GenReg = getReg();
+
+    printf("\t%%%d = \tsub i64 \t%%%d, \t0\n", condReg, condVal); 
+
+    switch (cond) {
+	default: assert(0 && "not all cases handled\n");
+	case GEN_IS_ZERO:
+	    printf("\t%%%d = \ticmp eq i64 %%%d, 0\n", cmpReg, condReg);
+	    break;
+	case GEN_NOT_ZERO:
+	    printf("\t%%%d = \ticmp ne i64 %%%d, 0\n", cmpReg, condReg);
+	    break;
+    }
+
+    local contLabel: GenLabel = genGetLabel();
+    printf("\tbr i1 %%%d, label %%.L%d, label %%.L%d\n",
+	   cmpReg, labelIdent, contLabel);
+    functionBuildingInfo.bbClosed = true;
+    genDefLabel(contLabel);
+}
+
+struct FnArgNode
+{
+    argReg: GenReg;
+    next: ->FnArgNode;
+};
+
+struct FnArgStack
+{
+    fnName: ->UStr;
+    argList: ->FnArgNode;
+    next: -> FnArgStack;
+};
+
+global fnArgStack: -> FnArgStack;
+
+fn genCallBegin(fnName: ->UStr, numArgs: unsigned)
+{
+    local n: -> FnArgStack = malloc(sizeof(*n));
+    n->fnName = fnName;
+    n->argList = nullptr;
+    n->next = fnArgStack;
+    fnArgStack = n;
+}
+
+fn genCallAddArg(argReg: GenReg, argPos: unsigned)
+{
+    assert(fnArgStack);
+    local n: ->FnArgNode = malloc(sizeof(*n));
+    n->argReg = argReg;
+    n->next = fnArgStack->argList;
+    fnArgStack->argList = n;
+}
+
+fn genCallEnd(): GenReg
+{
+    assert(fnArgStack);
+    local retVal: GenReg = getReg();
+    printf("\t%%%d = call i64 @%s(", retVal, fnArgStack->fnName);
+    for (local n: ->FnArgNode = fnArgStack->argList; n; ) {
+	printf("i64 %%%d", n->argReg);
+	if (n->next) {
+	    printf(", ");
+	}
+	local f: ->FnArgNode = n;
+	n = n->next;
+	free(f);
+    }
+    printf(")\n");
+    local f: ->FnArgStack = fnArgStack;
+    fnArgStack = fnArgStack->next;
+    free(f);
+    return retVal;
+}
+
