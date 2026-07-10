@@ -50,7 +50,7 @@ all: $(target) $(common_obj) $(target_obj) $(ulm.tools)
 
 $(ulm.tools) $(ulm.isa): $(ulm.isa).isa
 	rm -rf $(ulm.isa)
-	ulm-generator --install $(ulm.isa).isa
+	ulm-generator $(ulm.isa).isa
 
 .PHONY: tree.tex
 tree.tex: xtest_parser
